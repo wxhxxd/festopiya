@@ -34,18 +34,41 @@ export default function OrganizerDashboard() {
         
       if (eventsData) setMyEvents(eventsData);
 
-      // 2. Fetch all Bookings targeting this organizer's fests (Requires joining events & vendor profiles)
-      const { data: bookingsData } = await supabase
+      // 2. Fetch Bookings (Without the strict vendor_profiles SQL join)
+      const { data: bookingsData, error: bookingsError } = await supabase
         .from('bookings')
         .select(`
           *,
-          events!inner (event_name, organizer_id),
-          vendor_profiles (stall_name, food_category, phone)
+          events!inner (event_name, organizer_id)
         `)
         .eq('events.organizer_id', user.id)
         .order('created_at', { ascending: false });
 
-      if (bookingsData) setVendorRequests(bookingsData);
+      if (bookingsError) {
+        alert("🚨 DB Error: " + bookingsError.message);
+        setLoading(false);
+        return;
+      }
+
+      // 3. The Bulletproof Manual Join: Match profiles to requests safely!
+      if (bookingsData && bookingsData.length > 0) {
+        const vendorIds = bookingsData.map(b => b.vendor_id);
+        
+        const { data: profilesData } = await supabase
+          .from('vendor_profiles')
+          .select('*')
+          .in('id', vendorIds);
+
+        const mergedBookings = bookingsData.map(booking => ({
+          ...booking,
+          vendor_profiles: profilesData?.find(p => p.id === booking.vendor_id) || null
+        }));
+        
+        setVendorRequests(mergedBookings);
+      } else {
+        setVendorRequests([]);
+      }
+      
       setLoading(false);
     }
     fetchData();

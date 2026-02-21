@@ -64,16 +64,26 @@ export default function VendorDashboard() {
     if (!currentUserId || !bookingModalEvent) return;
     setIsSubmitting(true);
     const festopiyaCut = offerPrice * 0.05; 
+    
+    // Attempt to save the offer to the database
     const { error } = await supabase.from('bookings').insert([{
-      event_id: bookingModalEvent.id, vendor_id: currentUserId, agreed_fee: offerPrice,      
-      total_amount: offerPrice, commission_amount: festopiyaCut, status: 'pending' 
+      event_id: bookingModalEvent.id, 
+      vendor_id: currentUserId, 
+      agreed_fee: offerPrice,      
+      total_amount: offerPrice, 
+      commission_amount: festopiyaCut, 
+      status: 'pending' 
     }]);
 
-    if (!error) {
+    // THE FIX: This will pop up an alert telling us EXACTLY why it failed
+    if (error) {
+      alert("🚨 DATABASE ERROR: " + error.message);
+      setIsSubmitting(false);
+    } else {
+      alert("✅ Offer sent successfully!");
       setBookingModalEvent(null);
       window.location.reload(); 
     }
-    setIsSubmitting(false);
   };
 
   // --- TAB RENDERERS ---

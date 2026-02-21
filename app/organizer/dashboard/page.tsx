@@ -2,13 +2,16 @@
 
 import { useEffect, useState } from 'react';
 import { createClient } from '@/utils/supabase/client';
-import Link from 'next/link';
 import ChatModal from '@/app/(auth)/components/ChatModal'; 
+import Link from 'next/link';
+
+type TabType = 'fests' | 'requests' | 'revenue';
 
 export default function OrganizerDashboard() {
-  const [events, setEvents] = useState<any[]>([]);
-  const [requests, setRequests] = useState<any[]>([]);
-  const [confirmedVendors, setConfirmedVendors] = useState<any[]>([]);
+  const [activeTab, setActiveTab] = useState<TabType>('fests');
+  
+  const [myEvents, setMyEvents] = useState<any[]>([]);
+  const [vendorRequests, setVendorRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   
   const [currentUserId, setCurrentUserId] = useState<string>('');
@@ -17,231 +20,255 @@ export default function OrganizerDashboard() {
   const supabase = createClient();
 
   useEffect(() => {
-    async function fetchDashboardData() {
+    async function fetchData() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
       setCurrentUserId(user.id);
 
+      // 1. Fetch Fests created by this organizer
       const { data: eventsData } = await supabase
         .from('events')
         .select('*')
         .eq('organizer_id', user.id)
         .order('created_at', { ascending: false });
-
-      if (eventsData) {
-        setEvents(eventsData);
-        const eventIds = eventsData.map(e => e.id);
         
-        if (eventIds.length > 0) {
-          const { data: bookingsData } = await supabase
-            .from('bookings')
-            .select('*')
-            .in('event_id', eventIds);
-            
-          if (bookingsData) {
-            const { data: profilesData } = await supabase
-              .from('vendor_profiles')
-              .select('id, stall_name, food_category');
+      if (eventsData) setMyEvents(eventsData);
 
-            const enrichedBookings = bookingsData.map(booking => {
-              const profile = profilesData?.find(p => p.id === booking.vendor_id);
-              const event = eventsData.find(e => e.id === booking.event_id); // Find the original event
-              
-              const offerAmount = booking.agreed_fee || 0;
-              const originalFee = event?.base_stall_fee || offerAmount;
-              
-              // NEW: Check if the vendor negotiated the price down
-              const isNegotiated = offerAmount !== originalFee;
+      // 2. Fetch all Bookings targeting this organizer's fests (Requires joining events & vendor profiles)
+      const { data: bookingsData } = await supabase
+        .from('bookings')
+        .select(`
+          *,
+          events!inner (event_name, organizer_id),
+          vendor_profiles (stall_name, food_category, phone)
+        `)
+        .eq('events.organizer_id', user.id)
+        .order('created_at', { ascending: false });
 
-              const festopiyaCommission = offerAmount * 0.05; 
-              const organizerNet = offerAmount - festopiyaCommission;
-
-              return {
-                ...booking,
-                math_gross: offerAmount,
-                math_fee: festopiyaCommission,
-                math_net: organizerNet,
-                original_fee: originalFee,
-                is_negotiated: isNegotiated,
-                event_name: event?.event_name || 'Unknown Event',
-                vendor_profiles: profile || null
-              };
-            });
-
-            setRequests(enrichedBookings.filter(b => b.status === 'pending'));
-            setConfirmedVendors(enrichedBookings.filter(b => b.status === 'approved'));
-          }
-        }
-      }
+      if (bookingsData) setVendorRequests(bookingsData);
       setLoading(false);
     }
-    fetchDashboardData();
+    fetchData();
   }, [supabase]);
 
-  const handleRequest = async (bookingId: string, action: 'approved' | 'declined') => {
-    const { error } = await supabase.from('bookings').update({ status: action }).eq('id', bookingId);
-    if (error) alert("Error: " + error.message);
-    else window.location.reload(); 
+  const handleUpdateStatus = async (bookingId: string, newStatus: string) => {
+    const { error } = await supabase
+      .from('bookings')
+      .update({ status: newStatus })
+      .eq('id', bookingId);
+
+    if (!error) {
+      setVendorRequests(prev => 
+        prev.map(req => req.id === bookingId ? { ...req, status: newStatus } : req)
+      );
+    } else {
+      alert("Error updating status: " + error.message);
+    }
   };
 
-  const totalGross = confirmedVendors.reduce((acc, curr) => acc + curr.math_gross, 0);
-  const totalFees = confirmedVendors.reduce((acc, curr) => acc + curr.math_fee, 0);
-  const totalNet = confirmedVendors.reduce((acc, curr) => acc + curr.math_net, 0);
+  // --- TAB RENDERERS ---
 
-  if (loading) return <div className="p-8 text-center font-black text-gray-400">LOADING HUB...</div>;
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-8">
-      <div className="max-w-6xl mx-auto">
-        
-        <div className="flex justify-between items-center mb-10 border-b-4 border-black pb-6">
-          <h1 className="text-4xl font-black text-gray-900 tracking-tighter italic">ORGANIZER HUB</h1>
-          <Link href="/organizer/create-event" className="bg-blue-600 text-white px-8 py-3 rounded-2xl font-black hover:bg-blue-700 shadow-xl transition-all">
-            + CREATE NEW FEST
-          </Link>
-        </div>
-
-        {/* REVENUE CARDS */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 mb-12">
-          <div className="bg-white p-8 rounded-3xl shadow-sm border border-gray-100">
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Gross Sales</p>
-            <p className="text-4xl font-black text-gray-900 mt-2">₹{totalGross}</p>
-          </div>
-          <div className="bg-white p-8 rounded-3xl shadow-sm border border-orange-100">
-            <p className="text-[10px] font-black text-orange-500 uppercase tracking-widest">Festopiya Platform Fee (5%)</p>
-            <p className="text-4xl font-black text-orange-600 mt-2">- ₹{totalFees}</p>
-          </div>
-          <div className="bg-black p-8 rounded-3xl shadow-2xl">
-            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest">Your Net Payout</p>
-            <p className="text-4xl font-black text-white mt-2">₹{totalNet}</p>
-          </div>
-        </div>
-
-        {/* NEGOTIATION & PENDING REQUESTS */}
-        {requests.length > 0 && (
-          <div className="mb-12">
-            <h2 className="text-2xl font-black text-gray-900 mb-6 uppercase tracking-tighter">Stall Offers</h2>
-            <div className="space-y-4">
-              {requests.map((req) => (
-                <div key={req.id} className={`bg-white p-6 rounded-2xl border-l-8 flex justify-between items-center shadow-md ${req.is_negotiated ? 'border-purple-500' : 'border-blue-600'}`}>
-                  <div>
-                    <div className="flex items-center gap-3">
-                      <p className="font-black text-gray-900 text-xl uppercase italic">
-                        {req.vendor_profiles?.stall_name || "PENDING PROFILE"}
-                      </p>
-                      {/* NEW: Explicit Warning if the price was changed! */}
-                      {req.is_negotiated && (
-                        <span className="bg-purple-100 text-purple-700 px-3 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest animate-pulse">
-                          Negotiated Offer
-                        </span>
-                      )}
-                    </div>
-                    
-                    <p className="text-xs font-bold text-gray-400 uppercase mt-2">
-                      Fest: {req.event_name}
-                    </p>
-                    
-                    <div className="mt-1">
-                      {req.is_negotiated ? (
-                        <p className="text-sm font-bold text-gray-900">
-                          Vendor Offered: <span className="text-purple-600 text-lg font-black">₹{req.math_gross}</span> 
-                          <span className="line-through text-gray-400 ml-2 text-xs">₹{req.original_fee}</span>
-                        </p>
-                      ) : (
-                        <p className="text-sm font-bold text-gray-900">
-                          Stall Fee: ₹{req.math_gross}
-                        </p>
-                      )}
-                      <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
-                        Your Net Payout: <span className={req.is_negotiated ? 'text-purple-600' : 'text-blue-600'}>₹{req.math_net}</span>
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-col gap-2">
-                    {/* Organizer can chat back to counter-offer! */}
-                    <button 
-                      onClick={() => setActiveChat({ id: req.vendor_id, name: req.vendor_profiles?.stall_name || 'Vendor' })}
-                      className="bg-gray-100 hover:bg-black hover:text-white text-gray-900 px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all"
-                    >
-                      Chat / Counter
-                    </button>
-                    <div className="flex gap-2">
-                      <button onClick={() => handleRequest(req.id, 'declined')} className="bg-red-50 hover:bg-red-500 hover:text-white text-red-600 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all">Reject</button>
-                      <button onClick={() => handleRequest(req.id, 'approved')} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest shadow-md transition-all">Accept</button>
-                    </div>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* ACTIVE EVENTS */}
-        <div className="mb-12">
-          <h2 className="text-2xl font-black text-gray-900 mb-6 uppercase tracking-tighter">Your Active Fests</h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {events.map((event) => (
-              <Link href={`/organizer/events/${event.id}`} key={event.id} className="group">
-                <div className="bg-white p-8 rounded-3xl border border-gray-200 group-hover:border-black transition-all shadow-sm group-hover:shadow-2xl cursor-pointer">
-                  <h3 className="text-2xl font-black text-gray-900 uppercase italic group-hover:text-blue-600 transition-colors">{event.event_name}</h3>
-                  <div className="flex justify-between items-center mt-6">
-                    <p className="text-xs font-black text-gray-400 uppercase tracking-widest">Base Stall Fee: ₹{event.base_stall_fee}</p>
-                    <span className="text-blue-600 font-black text-sm">MANAGE VENDORS →</span>
-                  </div>
-                </div>
-              </Link>
-            ))}
-          </div>
-        </div>
-
-        {/* LEDGER TABLE */}
+  const renderFests = () => (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-end mb-8 gap-4">
         <div>
-          <h2 className="text-2xl font-black text-gray-900 mb-6 uppercase tracking-tighter">Confirmed Vendor Ledger</h2>
-          <div className="bg-white rounded-3xl shadow-sm border border-gray-200 overflow-hidden">
-            <table className="w-full text-left">
-              <thead className="bg-gray-50 border-b border-gray-100">
-                <tr>
-                  <th className="p-6 text-[10px] font-black text-gray-400 uppercase tracking-widest">Stall Vendor</th>
-                  <th className="p-6 text-[10px] font-black text-gray-400 uppercase tracking-widest">Agreed Price</th>
-                  <th className="p-6 text-[10px] font-black text-green-500 uppercase tracking-widest text-right">Net Payout</th>
-                  <th className="p-6 text-[10px] font-black text-blue-500 uppercase tracking-widest text-right">Comms</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {confirmedVendors.map((v) => (
-                  <tr key={v.id} className="hover:bg-gray-50 transition-colors">
-                    <td className="p-6">
-                      <p className="font-black text-gray-900 uppercase italic text-sm">{v.vendor_profiles?.stall_name || "GUEST"}</p>
-                      {v.is_negotiated && <p className="text-[9px] font-bold text-purple-500 uppercase mt-1">Negotiated Rate</p>}
-                    </td>
-                    <td className="p-6 font-bold text-gray-900 text-sm">₹{v.math_gross}</td>
-                    <td className="p-6 font-black text-green-600 text-right">₹{v.math_net}</td>
-                    <td className="p-6 text-right">
-                      <button 
-                        onClick={() => setActiveChat({ id: v.vendor_id, name: v.vendor_profiles?.stall_name || 'Vendor' })}
-                        className="bg-blue-100 hover:bg-blue-600 hover:text-white text-blue-700 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-sm"
-                      >
-                        Message
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <h2 className="text-3xl font-black text-gray-900 uppercase tracking-tighter italic">My Fests</h2>
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mt-1">Manage your active events</p>
         </div>
-
+        <Link href="/organizer/create-event" className="bg-black hover:bg-blue-600 text-white px-8 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all shadow-lg hover:shadow-xl hover:-translate-y-1">
+          + Host New Fest
+        </Link>
       </div>
 
-      {activeChat && (
-        <ChatModal 
-          currentUserId={currentUserId}
-          recipientId={activeChat.id}
-          recipientName={activeChat.name}
-          onClose={() => setActiveChat(null)}
-        />
-      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-24 md:pb-8">
+        {myEvents.length === 0 ? (
+          <div className="col-span-full bg-white p-10 rounded-3xl border border-dashed border-gray-300 text-center">
+            <p className="text-gray-500 font-bold uppercase tracking-widest mb-4">You haven't hosted any fests yet.</p>
+          </div>
+        ) : (
+          myEvents.map((event) => (
+            <div key={event.id} className="bg-white rounded-3xl p-8 shadow-sm border border-gray-100 hover:border-black transition-colors group">
+              <div className="flex justify-between items-start mb-6">
+                <h3 className="text-2xl font-black text-gray-900 uppercase italic">{event.event_name}</h3>
+                <span className="bg-green-100 text-green-700 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest">Active</span>
+              </div>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                  <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Base Price</p>
+                  <p className="text-xl font-black text-gray-900">₹{event.base_stall_fee}</p>
+                </div>
+                <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                  <p className="text-[9px] font-black text-gray-400 uppercase tracking-widest mb-1">Expected Footfall</p>
+                  <p className="text-xl font-black text-gray-900">{event.expected_footfall}</p>
+                </div>
+              </div>
+              <p className="text-xs font-bold text-gray-500 uppercase tracking-widest">
+                📅 {event.event_date ? new Date(event.event_date).toLocaleDateString() : 'Date TBA'}
+              </p>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  const renderRequests = () => (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <h2 className="text-3xl font-black text-gray-900 uppercase tracking-tighter italic mb-8">Vendor Requests</h2>
+      
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-24 md:pb-8">
+        {vendorRequests.length === 0 ? (
+          <div className="col-span-full bg-white p-10 rounded-3xl border border-dashed border-gray-300 text-center">
+            <p className="text-gray-500 font-bold uppercase tracking-widest">No stall requests yet.</p>
+          </div>
+        ) : (
+          vendorRequests.map((req) => (
+            <div key={req.id} className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100 flex flex-col justify-between hover:shadow-lg transition-all">
+              <div className="flex justify-between items-start mb-4 border-b border-gray-100 pb-4">
+                <div>
+                  <h3 className="font-black text-xl text-gray-900 uppercase italic">{req.vendor_profiles?.stall_name || 'PENDING PROFILE'}</h3>
+                  <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-1">
+                    Event: {req.events?.event_name}
+                  </p>
+                  <p className="text-[10px] text-blue-600 font-black uppercase tracking-widest mt-1">
+                    {req.vendor_profiles?.food_category || 'Category TBA'}
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-[10px] text-gray-400 font-black uppercase tracking-widest mb-1">Offered Amount</p>
+                  <p className="text-2xl font-black text-gray-900">₹{req.total_amount}</p>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => setActiveChat({ id: req.vendor_id, name: req.vendor_profiles?.stall_name || 'Vendor' })}
+                  className="flex-1 bg-gray-50 hover:bg-gray-200 text-gray-900 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                >
+                  💬 Chat
+                </button>
+                <a 
+                  href={req.vendor_profiles?.phone ? `tel:${req.vendor_profiles.phone}` : '#'}
+                  className={`flex-1 flex justify-center items-center py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${
+                    req.vendor_profiles?.phone ? 'bg-gray-100 hover:bg-gray-300 text-gray-900' : 'bg-gray-50 text-gray-300 cursor-not-allowed'
+                  }`}
+                >
+                  📞 Call
+                </a>
+              </div>
+
+              <div className="mt-4 pt-4 border-t border-gray-100 flex gap-2">
+                {req.status === 'pending' ? (
+                  <>
+                    <button onClick={() => handleUpdateStatus(req.id, 'approved')} className="flex-1 bg-black hover:bg-green-600 text-white py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">
+                      Accept Offer
+                    </button>
+                    <button onClick={() => handleUpdateStatus(req.id, 'declined')} className="flex-1 bg-white border-2 border-gray-200 hover:border-red-500 hover:text-red-600 text-gray-900 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-colors">
+                      Decline
+                    </button>
+                  </>
+                ) : (
+                  <div className="w-full text-center py-3 rounded-xl bg-gray-50">
+                    <span className={`text-[10px] font-black uppercase tracking-widest ${req.status === 'approved' ? 'text-green-600' : 'text-red-600'}`}>
+                      {req.status === 'approved' ? '✅ Offer Accepted' : '❌ Offer Declined'}
+                    </span>
+                  </div>
+                )}
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+
+  const renderRevenue = () => {
+    const grossRevenue = vendorRequests.filter(req => req.status === 'approved').reduce((sum, req) => sum + req.total_amount, 0);
+    const platformFees = grossRevenue * 0.05;
+    const netPayout = grossRevenue - platformFees;
+
+    return (
+      <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+        <h2 className="text-3xl font-black text-gray-900 uppercase tracking-tighter italic mb-8">Revenue Tracker</h2>
+        
+        <div className="bg-black text-white p-10 rounded-3xl shadow-xl bg-gradient-to-br from-black to-gray-800 mb-6">
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Total Net Earnings</p>
+          <h3 className="text-6xl font-black tracking-tighter italic mb-2">₹{netPayout.toLocaleString()}</h3>
+          <p className="text-[10px] font-bold text-green-400 uppercase tracking-widest mt-2 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span> Ready for Payout
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm">
+            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Gross Vendor Payments</p>
+            <p className="text-3xl font-black text-gray-900">₹{grossRevenue.toLocaleString()}</p>
+          </div>
+          <div className="bg-white p-8 rounded-3xl border border-gray-200 shadow-sm">
+            <p className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Festopiya Platform Fee (5%)</p>
+            <p className="text-3xl font-black text-red-500">- ₹{platformFees.toLocaleString()}</p>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50 font-black text-gray-400 uppercase tracking-widest">LOADING DASHBOARD...</div>;
+
+  return (
+    <div className="flex h-screen bg-gray-50 overflow-hidden font-sans selection:bg-blue-200">
+      
+      {/* DESKTOP SIDEBAR */}
+      <aside className="hidden md:flex flex-col w-72 bg-white border-r border-gray-200 h-full p-6 z-20 shadow-sm">
+        <div className="mb-12 mt-4">
+          <h1 className="text-3xl font-black text-gray-900 tracking-tighter italic">FESTOPIYA</h1>
+          <span className="bg-black text-white px-2 py-1 rounded-md text-[8px] font-black uppercase tracking-widest ml-1 shadow-md">Organizer</span>
+        </div>
+        <nav className="flex-1 space-y-3">
+          <button onClick={() => setActiveTab('fests')} className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all ${activeTab === 'fests' ? 'bg-black text-white shadow-lg shadow-black/20' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}>
+            <span className="text-xl">🎪</span> My Fests
+          </button>
+          <button onClick={() => setActiveTab('requests')} className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all ${activeTab === 'requests' ? 'bg-black text-white shadow-lg shadow-black/20' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}>
+            <span className="text-xl">📥</span> Requests
+          </button>
+          <button onClick={() => setActiveTab('revenue')} className={`w-full flex items-center gap-4 px-5 py-4 rounded-2xl font-black uppercase tracking-widest text-xs transition-all ${activeTab === 'revenue' ? 'bg-black text-white shadow-lg shadow-black/20' : 'text-gray-500 hover:bg-gray-50 hover:text-gray-900'}`}>
+            <span className="text-xl">💰</span> Revenue
+          </button>
+        </nav>
+        <div className="pt-6 border-t border-gray-100 space-y-3">
+          <button className="w-full flex justify-center items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-400 py-4 rounded-xl font-black uppercase tracking-widest text-[10px] transition-colors cursor-not-allowed">
+            ⚙️ Settings (Coming Soon)
+          </button>
+        </div>
+      </aside>
+
+      {/* MOBILE BOTTOM NAVIGATION */}
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 z-50 pb-safe">
+        <div className="flex justify-around items-center p-2">
+          <button onClick={() => setActiveTab('fests')} className={`flex flex-col items-center p-3 rounded-xl transition-all ${activeTab === 'fests' ? 'text-black' : 'text-gray-400'}`}>
+            <span className="text-2xl mb-1">🎪</span>
+            <span className="text-[8px] font-black uppercase tracking-widest">Fests</span>
+          </button>
+          <button onClick={() => setActiveTab('requests')} className={`flex flex-col items-center p-3 rounded-xl transition-all ${activeTab === 'requests' ? 'text-black' : 'text-gray-400'}`}>
+            <span className="text-2xl mb-1">📥</span>
+            <span className="text-[8px] font-black uppercase tracking-widest">Requests</span>
+          </button>
+          <button onClick={() => setActiveTab('revenue')} className={`flex flex-col items-center p-3 rounded-xl transition-all ${activeTab === 'revenue' ? 'text-black' : 'text-gray-400'}`}>
+            <span className="text-2xl mb-1">💰</span>
+            <span className="text-[8px] font-black uppercase tracking-widest">Revenue</span>
+          </button>
+        </div>
+      </nav>
+
+      {/* MAIN CONTENT AREA */}
+      <main className="flex-1 overflow-y-auto p-6 md:p-12 relative z-10">
+        {activeTab === 'fests' && renderFests()}
+        {activeTab === 'requests' && renderRequests()}
+        {activeTab === 'revenue' && renderRevenue()}
+      </main>
+
+      {/* CHAT MODAL */}
+      {activeChat && <ChatModal currentUserId={currentUserId} recipientId={activeChat.id} recipientName={activeChat.name} onClose={() => setActiveChat(null)} />}
     </div>
   );
 }
